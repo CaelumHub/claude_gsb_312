@@ -15,8 +15,9 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine import (CoverageAnalyzer, CronSchedule, DefectManager,
-                    EnvironmentManager, NotificationManager, ReportGenerator,
-                    TestExecutor, cron_matches, parse_cron)
+                    EnvironmentManager, NotificationManager, QualityGateEvaluator,
+                    ReportGenerator, TestExecutor, cron_matches, normalize_coverage_gate,
+                    parse_cron)
 from engine.executor import evaluate_assertion, resolve_expr, safe_eval
 from storage import BuildStoreRegistry, StoreRegistry
 
@@ -210,6 +211,69 @@ class TestCoverage(unittest.TestCase):
                 reg.for_project("p1").create(bid)
                 cov.generate("p1", bid, 0.5)
             self.assertEqual(len(cov.trend("p1")["points"]), 2)
+
+
+class TestQualityGate(unittest.TestCase):
+    def test_normalize_thresholds(self):
+        gate = normalize_coverage_gate({"enabled": True,
+                                        "overall_threshold": "60.5",
+                                        "new_code_threshold": 90})
+        self.assertTrue(gate["enabled"])
+        self.assertEqual(gate["overall_threshold"], 60.5)
+        with self.assertRaises(ValueError):
+            normalize_coverage_gate({"overall_threshold": 101})
+
+    def _setup(self, tmp):
+        registry = StoreRegistry(os.path.join(tmp, "store"), shard_size=50)
+        builds = BuildStoreRegistry(os.path.join(tmp, "builds"))
+        coverage = CoverageAnalyzer(builds)
+        gate = QualityGateEvaluator(registry, builds, coverage)
+        pid = registry.store("projects").insert({
+            "name": "P",
+            "coverage_gate": {"enabled": True, "overall_threshold": 100.0,
+                              "new_code_threshold": 100.0},
+        })
+        store = builds.for_project(pid)
+        store.create("b1")
+        store.set_total("b1", 1)
+        store.record_result("b1", {"case_id": "c1", "case_name": "c1",
+                                   "group": "g", "priority": "P1",
+                                   "status": "passed", "duration": 0.01,
+                                   "logs": []})
+        store.finish("b1", "passed")
+        cov1 = coverage.generate(pid, "b1", 1.0)
+        gate.evaluate_build(pid, "b1", coverage=cov1)
+
+        store.create("b2")
+        store.set_total("b2", 1)
+        store.record_result("b2", {"case_id": "c2", "case_name": "c2",
+                                   "group": "g", "priority": "P1",
+                                   "status": "passed", "duration": 0.01,
+                                   "logs": []})
+        store.finish("b2", "passed")
+        cov2 = coverage.generate(pid, "b2", 1.0)
+        return registry, builds, coverage, gate, pid, cov2
+
+    def test_gate_fails_build_and_blocks_release(self):
+        with tempfile.TemporaryDirectory() as d:
+            registry, builds, coverage, gate, pid, cov2 = self._setup(d)
+            result = gate.evaluate_build(pid, "b2", coverage=cov2)
+            self.assertEqual(result["gate_status"], "failed")
+            self.assertFalse(result["release_allowed"])
+            build = builds.for_project(pid).get("b2")
+            self.assertEqual(build["status"], "failed")
+            self.assertEqual(build["quality_gate_status"], "failed")
+            self.assertFalse(build["release_allowed"])
+            self.assertEqual(len(gate.history(pid)), 2)
+
+    def test_diff_compares_selected_two_builds(self):
+        with tempfile.TemporaryDirectory() as d:
+            registry, builds, coverage, gate, pid, cov2 = self._setup(d)
+            diff = coverage.diff_coverage(pid, "b2", "b1", cov2)
+            self.assertGreater(diff["changed_lines"], 0)
+            self.assertEqual(diff["changed_lines"],
+                             diff["covered_lines"] + diff["missed_lines"])
+            self.assertTrue(all("lines" in f for f in diff["files"]))
 
 
 class TestReport(unittest.TestCase):

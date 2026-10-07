@@ -16,7 +16,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine import (CoverageAnalyzer, DefectManager, EnvironmentManager,
-                    NotificationManager, ReportGenerator, Scheduler, TestExecutor)
+                    NotificationManager, QualityGateEvaluator, ReportGenerator,
+                    Scheduler, TestExecutor)
 from storage import BuildStoreRegistry, StoreRegistry
 
 
@@ -26,12 +27,13 @@ def _make_scheduler(data_root):
     executor = TestExecutor()
     env_mgr = EnvironmentManager(registry, data_root)
     coverage = CoverageAnalyzer(builds)
+    quality_gate = QualityGateEvaluator(registry, builds, coverage)
     report = ReportGenerator(builds)
     defects = DefectManager(registry)
     notify = NotificationManager(registry)
     sched = Scheduler(registry, builds, executor, env_mgr, report, coverage,
-                      defects, notify, max_build_workers=2, max_case_workers=4,
-                      tick_seconds=0.2)
+                      quality_gate, defects, notify, max_build_workers=2,
+                      max_case_workers=4, tick_seconds=0.2)
     return registry, builds, env_mgr, sched
 
 
@@ -72,13 +74,8 @@ class TestSchedulerEndToEnd(unittest.TestCase):
         build_id = result["id"]
 
         # 等待构建完成
-        deadline = time.time() + 20
-        build = None
-        while time.time() < deadline:
-            build = self.builds.for_project(pid).get(build_id)
-            if build and build["status"] in ("passed", "failed", "cancelled", "error"):
-                break
-            time.sleep(0.05)
+        self.assertTrue(self.sched.wait_build(build_id, 20))
+        build = self.builds.for_project(pid).get(build_id)
         self.assertIsNotNone(build)
         self.assertEqual(build["status"], "passed")
         self.assertEqual(build["passed"], 12)
@@ -92,12 +89,9 @@ class TestSchedulerEndToEnd(unittest.TestCase):
         pid, suite = self._setup_project(20)
         results = [self.sched.submit_build(pid, suite["id"]) for _ in range(3)]
         ids = [r["id"] for r in results]
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            builds = [self.builds.for_project(pid).get(b) for b in ids]
-            if all(b and b["status"] in ("passed", "failed", "cancelled", "error") for b in builds):
-                break
-            time.sleep(0.05)
+        for bid in ids:
+            self.assertTrue(self.sched.wait_build(bid, 30))
+        builds = [self.builds.for_project(pid).get(b) for b in ids]
         for b in self.builds.for_project(pid).list_builds():
             if b["id"] in ids:
                 self.assertEqual(b["status"], "passed")
@@ -117,6 +111,20 @@ class TestSchedulerEndToEnd(unittest.TestCase):
             time.sleep(0.05)
         b = self.builds.for_project(pid).get(build_id)
         self.assertIn(b["status"], ("cancelled", "passed", "failed"))
+
+    def test_coverage_gate_marks_passing_tests_as_failed(self):
+        pid, suite = self._setup_project(3)
+        self.registry.store("projects").update(pid, {
+            "coverage_gate": {"enabled": True, "overall_threshold": 100.0,
+                              "new_code_threshold": 100.0},
+        })
+        result = self.sched.submit_build(pid, suite["id"], trigger="ci")
+        build_id = result["id"]
+        self.assertTrue(self.sched.wait_build(build_id, 20))
+        build = self.builds.for_project(pid).get(build_id)
+        self.assertEqual(build["status"], "failed")
+        self.assertEqual(build["quality_gate_status"], "failed")
+        self.assertFalse(build["release_allowed"])
 
     def test_schedule_fires_once_per_minute(self):
         pid, suite = self._setup_project(3)

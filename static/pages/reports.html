@@ -23,7 +23,7 @@
 
   <main class="main">
     <h1 class="page-title">测试报告</h1>
-    <p class="page-desc">查看每次构建的通过率、耗时、分组与失败明细，以及跨构建趋势。</p>
+    <p class="page-desc">查看每次构建的通过率、耗时、分组、失败明细、覆盖率门禁与发布判定，以及跨构建趋势。</p>
 
     <div class="card">
       <div class="row">
@@ -33,6 +33,11 @@
         <button class="btn secondary" id="btn-refresh">刷新</button>
       </div>
     </div>
+
+    <section class="card">
+      <h2>发布门禁</h2>
+      <div id="gate-panel"><div class="empty">请选择构建</div></div>
+    </section>
 
     <!-- 项目趋势 -->
     <section class="card">
@@ -64,9 +69,11 @@ let currentBuild = null;
 
 async function init() {
   const params = new URLSearchParams(location.search);
+  const selectedBuildId = params.get("build_id");
   projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
   await loadAll();
-  if (builds[0]) selectBuild(builds[0].id);
+  if (selectedBuildId && builds.some(b => b.id === selectedBuildId)) selectBuild(selectedBuildId);
+  else if (builds[0]) selectBuild(builds[0].id);
 }
 
 async function switchProject(id) { projectId = id; currentBuild = null; await loadAll(); }
@@ -90,7 +97,8 @@ async function loadTrend() {
     </div>`).join("") + "</div>";
   const agg = d.aggregate || {};
   host.insertAdjacentHTML("beforeend", `<div class="mt muted" style="font-size:13px">最近 ${agg.total_builds} 次构建 ·
-    平均通过率 <strong>${agg.avg_pass_rate}%</strong> · 平均耗时 <strong>${fmtDur(agg.avg_duration)}</strong></div>`);
+    平均通过率 <strong>${agg.avg_pass_rate}%</strong> · 门禁通过率 <strong>${agg.gate_pass_rate || 0}%</strong> ·
+    可发布构建 <strong>${agg.releasable_builds || 0}</strong> 次 · 平均耗时 <strong>${fmtDur(agg.avg_duration)}</strong></div>`);
 }
 
 async function loadBuilds() {
@@ -101,18 +109,28 @@ async function loadBuilds() {
   host.innerHTML = builds.map(b => `
     <div class="build-item ${b.id===currentBuild?'active':''}" onclick="selectBuild('${b.id}')">
       <div class="row spread"><strong>${esc(b.name||b.id)}</strong>${statusBadge(b.status)}</div>
-      <div class="muted" style="font-size:12px">通过 ${b.passed||0}/${b.total||0} · ${fmtDur(b.duration)} · ${fmtTime(b.finished_at)}</div>
+      <div class="row spread">
+        <span class="muted" style="font-size:12px">通过 ${b.passed||0}/${b.total||0} · ${fmtDur(b.duration)} · ${fmtTime(b.finished_at)}</span>
+        ${gateBadge(b.quality_gate_status)}
+      </div>
     </div>`).join("");
 }
 
 async function selectBuild(id) {
   currentBuild = id;
   loadBuilds();
-  const r = await api(`/api/builds/${id}/report`);
-  renderReport(r);
+  $("#gate-panel").innerHTML = '<div class="empty">加载门禁结论…</div>';
+  try {
+    const [r, gate] = await Promise.all([
+      api(`/api/builds/${id}/report`),
+      api(`/api/builds/${id}/quality-gate`).catch(() => null),
+    ]);
+    renderReport(r, gate);
+    renderGate(gate);
+  } catch (e) { toast(e.message, "error"); }
 }
 
-function renderReport(r) {
+function renderReport(r, gate) {
   $("#report-title").textContent = r.name || r.build_id;
   const s = r.summary || {};
   const d = r.durations || {};
@@ -130,6 +148,8 @@ function renderReport(r) {
     </div>
     <div class="mt row">
       ${statusBadge(r.status)}
+      ${gateBadge(gate && gate.gate_status)}
+      ${releaseBadge(gate ? gate.release_allowed : null)}
       <span class="muted" style="font-size:13px">触发 ${esc(r.trigger||'manual')} · ${fmtTime(r.started_at)} → ${fmtTime(r.finished_at)}</span>
     </div>
     <div class="mt grid cols-4">
@@ -160,6 +180,33 @@ function renderReport(r) {
       <thead><tr><th>用例</th><th>分组</th><th>状态</th><th>耗时</th></tr></thead>
       <tbody>${slowest.map(x => `<tr><td>${esc(x.case_name||x.case_id)}</td><td><span class="tag">${esc(x.group)}</span></td>
         <td>${statusBadge(x.status)}</td><td>${fmtDur(x.duration)}</td></tr>`).join("")}</tbody></table></div>` : ""}`;
+}
+
+function renderGate(gate) {
+  if (!gate) {
+    $("#gate-panel").innerHTML = '<div class="empty">该构建尚未生成门禁结论</div>';
+    return;
+  }
+  const diff = gate.diff_coverage;
+  const overall = gate.coverage || {};
+  const checks = gate.checks || [];
+  $("#gate-panel").innerHTML = `
+    <div class="grid cols-4">
+      <div class="stat ${gate.gate_status === 'passed' ? 'good' : gate.gate_status === 'failed' ? 'bad' : ''}">
+        <div class="v">${gate.gate_status === 'passed' ? '通过' : gate.gate_status === 'failed' ? '未通过' : '跳过'}</div>
+        <div class="k">门禁结论</div>
+      </div>
+      <div class="stat"><div class="v">${overall.percent == null ? '—' : overall.percent + '%'}</div><div class="k">总覆盖率</div></div>
+      <div class="stat"><div class="v">${diff && diff.has_changes ? diff.percent + '%' : '—'}</div><div class="k">新增代码覆盖率</div></div>
+      <div class="stat ${gate.release_allowed ? 'good' : 'bad'}"><div class="v">${gate.release_allowed ? '允许发布' : '禁止发布'}</div><div class="k">发布判定</div></div>
+    </div>
+    <div class="mt muted" style="font-size:13px">${esc(gate.reason || "—")}
+      ${gate.baseline_build_id ? ` · 基线：${esc(gate.baseline_name || gate.baseline_build_id)}` : ""}
+    </div>
+    ${checks.length ? `<table class="mt"><thead><tr><th>检查项</th><th>结论</th><th>实际值</th><th>阈值</th></tr></thead><tbody>
+      ${checks.map(c => `<tr><td>${esc(c.name)}</td><td>${c.skipped ? '<span class="badge skipped">跳过</span>' : c.passed ? '<span class="badge ok">通过</span>' : '<span class="badge failed">失败</span>'}</td>
+      <td>${c.actual == null ? '—' : esc(c.actual)}${c.unit || ''}</td><td>${esc(c.threshold)}${c.unit || ''}</td></tr>`).join("")}
+    </tbody></table>` : ""}`;
 }
 
 $("#btn-refresh").onclick = async () => { await loadAll(); if (currentBuild) selectBuild(currentBuild); };

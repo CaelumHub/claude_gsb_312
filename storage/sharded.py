@@ -273,6 +273,44 @@ class ShardedStore:
                     return merged
         return None
 
+    def upsert_by(self, field: str, value, record: dict) -> dict:
+        """按业务唯一键插入或整条替换记录。"""
+        record = dict(record)
+        with FileLock(lock_path_for(self.meta_path)):
+            meta = self._read_meta()
+            for index in range(meta.get("shard_count", 0)):
+                records = self._read_shard(index)
+                for i, existing in enumerate(records):
+                    if not existing.get("_deleted") and existing.get(field) == value:
+                        record["id"] = existing.get("id")
+                        record["created_at"] = existing.get("created_at", time.time())
+                        record["updated_at"] = time.time()
+                        records[i] = record
+                        self._write_shard(index, records)
+                        return record
+
+            record_id = record.get("id") or f"{self.name}_{meta['next_id']}"
+            meta["next_id"] += 1
+            record["id"] = record_id
+            record.setdefault("created_at", time.time())
+            index = meta["shard_count"] - 1 if meta["shard_count"] else -1
+            if index < 0:
+                index = 0
+                meta["shard_count"] = 1
+                self._write_shard(index, [record])
+            else:
+                records = self._read_shard(index)
+                if len(records) >= self.shard_size:
+                    index += 1
+                    meta["shard_count"] = index + 1
+                    records = [record]
+                else:
+                    records = records + [record]
+                self._write_shard(index, records)
+            meta["total"] += 1
+            self._write_meta(meta)
+            return record
+
     def delete(self, record_id: str) -> bool:
         """逻辑删除（墓碑标记），压缩时清理。"""
         with FileLock(lock_path_for(self.meta_path)):

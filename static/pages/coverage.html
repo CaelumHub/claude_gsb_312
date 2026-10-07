@@ -19,7 +19,7 @@
 
   <main class="main">
     <h1 class="page-title">代码覆盖率</h1>
-    <p class="page-desc">按构建查看模拟源码树的覆盖率，覆盖率与通过率弱相关、同一构建结果稳定。</p>
+    <p class="page-desc">按构建查看行级覆盖率，对比上一场构建计算新增/修改代码覆盖率，并在构建结束时执行发布门禁。</p>
 
     <div class="card">
       <div class="row">
@@ -42,6 +42,17 @@
       </section>
     </div>
 
+    <section class="card" id="gate-card">
+      <div class="row spread">
+        <h2 style="margin:0">覆盖率门禁结论</h2>
+        <div class="row">
+          <a class="btn small secondary" id="gate-history-link" href="#">门禁历史</a>
+          <span id="gate-badge"><span class="badge skipped">尚未判定</span></span>
+        </div>
+      </div>
+      <div id="gate-body" class="mt"><div class="empty">请选择构建</div></div>
+    </section>
+
     <section class="card">
       <h2>覆盖率趋势</h2>
       <div id="trend"><div class="empty">加载中…</div></div>
@@ -60,11 +71,12 @@ let currentBuild = null;
 async function init() {
   const params = new URLSearchParams(location.search);
   projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
+  $("#gate-history-link").href = `/page/quality-gates.html?project_id=${projectId || ""}`;
   await loadAll();
   if (builds[0]) selectBuild(builds[0].id);
 }
 
-async function switchProject(id) { projectId = id; currentBuild = null; await loadAll(); }
+async function switchProject(id) { projectId = id; currentBuild = null; $("#gate-history-link").href=`/page/quality-gates.html?project_id=${id}`; await loadAll(); }
 
 async function loadAll() {
   if (!projectId) return;
@@ -79,7 +91,10 @@ async function loadBuilds() {
   host.innerHTML = builds.map(b => `
     <div class="build-item ${b.id===currentBuild?'active':''}" onclick="selectBuild('${b.id}')">
       <div class="row spread"><strong>${esc(b.name||b.id)}</strong>${statusBadge(b.status)}</div>
-      <div class="muted" style="font-size:12px">通过率 ${b.total?Math.round(b.passed/b.total*100):0}% · ${fmtTime(b.finished_at)}</div>
+      <div class="row spread">
+        <span class="muted" style="font-size:12px">通过率 ${b.total?Math.round(b.passed/b.total*100):0}% · ${fmtTime(b.finished_at)}</span>
+        ${gateBadge(b.quality_gate_status)}
+      </div>
     </div>`).join("");
 }
 
@@ -88,28 +103,43 @@ async function loadTrend() {
   const pts = d.points || [];
   const host = $("#trend");
   if (!pts.length) { host.innerHTML = '<div class="empty">暂无覆盖率数据</div>'; return; }
-  host.innerHTML = `<table><thead><tr><th>构建</th><th>状态</th><th>覆盖率</th><th>通过率</th></tr></thead><tbody>` +
+  host.innerHTML = `<table><thead><tr><th>构建</th><th>状态</th><th>总覆盖率</th><th>新增代码</th><th>门禁</th><th>发布</th><th>通过率</th></tr></thead><tbody>` +
     pts.map(p => `<tr><td class="mono" style="font-size:12px">${esc(p.name||p.build_id)}</td>
       <td>${statusBadge(p.status)}</td><td><strong>${p.percent}%</strong></td>
+      <td>${p.new_code_percent == null ? "—" : `<strong>${p.new_code_percent}%</strong>`}</td>
+      <td>${gateBadge(p.quality_gate_status)}</td><td>${releaseBadge(p.release_allowed)}</td>
       <td>${Math.round(p.passed_ratio*100)}%</td></tr>`).join("") + "</tbody></table>";
 }
 
 async function selectBuild(id) {
   currentBuild = id;
   loadBuilds();
-  const c = await api(`/api/builds/${id}/coverage`);
-  renderCoverage(c);
+  $("#gate-badge").innerHTML = '<span class="badge skipped">加载中…</span>';
+  $("#gate-body").innerHTML = '<div class="empty">加载门禁结论…</div>';
+  try {
+    const [c, gate] = await Promise.all([
+      api(`/api/builds/${id}/coverage`),
+      api(`/api/builds/${id}/quality-gate`).catch(() => null),
+    ]);
+    renderCoverage(c, gate);
+    renderGate(gate);
+  } catch (e) { toast(e.message, "error"); }
 }
 
-function renderCoverage(c) {
+function renderCoverage(c, gate) {
+  const diff = gate && gate.diff_coverage;
+  const newPct = diff && diff.has_changes ? diff.percent : null;
   $("#cov-title").textContent = `覆盖率详情 · ${c.percent}%`;
   const files = c.files || [];
   $("#cov-body").innerHTML = `
     <div class="grid cols-3 mt">
       <div class="stat primary"><div class="v">${c.percent}%</div><div class="k">总体覆盖率</div></div>
       <div class="stat good"><div class="v">${c.covered_lines}</div><div class="k">覆盖行</div></div>
-      <div class="stat bad"><div class="v">${c.missed_lines}</div><div class="k">未覆盖行</div></div>
+      <div class="stat ${newPct == null ? '' : (gate.checks || []).some(x => x.key === 'new_code_coverage' && !x.passed) ? 'bad' : 'good'}">
+        <div class="v">${newPct == null ? '—' : newPct + '%'}</div><div class="k">新增代码覆盖率</div>
+      </div>
     </div>
+    ${diff && diff.has_changes ? `<div class="muted mt" style="font-size:12px">对比基线 ${esc(diff.baseline_build_id)} · 本次变更 ${diff.changed_lines} 行，覆盖 ${diff.covered_lines} 行。</div>` : ""}
     <div class="mt">${files.map(f => `
       <div class="cov-row">
         <span class="fname" title="${esc(f.file)}">${esc(f.file)}</span>
@@ -117,6 +147,31 @@ function renderCoverage(c) {
         <span class="pct">${f.percent}%</span>
       </div>`).join("")}</div>
     <div class="mt muted" style="font-size:12px">模拟源码树 · 共 ${c.total_lines} 行，覆盖 ${c.covered_lines} 行。</div>`;
+}
+
+function renderGate(gate) {
+  if (!gate) {
+    $("#gate-badge").innerHTML = '<span class="badge skipped">尚未生成</span>';
+    $("#gate-body").innerHTML = '<div class="empty">构建结束后会生成门禁结论</div>';
+    return;
+  }
+  $("#gate-badge").innerHTML = gateBadge(gate.gate_status) + " " + releaseBadge(gate.release_allowed);
+  const checks = gate.checks || [];
+  $("#gate-body").innerHTML = `
+    <div class="row spread">
+      <div><strong>${esc(gate.reason || "—")}</strong>
+        <div class="muted" style="font-size:12px;margin-top:4px">
+          阈值：总覆盖率 ${gate.thresholds?.overall_coverage ?? "—"}% ·
+          新增代码 ${gate.thresholds?.new_code_coverage ?? "—"}%
+          ${gate.baseline_build_id ? ` · 基线 ${esc(gate.baseline_name || gate.baseline_build_id)}` : ""}
+        </div>
+      </div>
+      <span class="muted" style="font-size:12px">${fmtTime(gate.evaluated_at)}</span>
+    </div>
+    ${checks.length ? `<table class="mt"><thead><tr><th>检查项</th><th>结论</th><th>实际值</th><th>阈值</th><th>说明</th></tr></thead><tbody>
+      ${checks.map(c => `<tr><td>${esc(c.name)}</td><td>${c.skipped ? '<span class="badge skipped">跳过</span>' : c.passed ? '<span class="badge ok">通过</span>' : '<span class="badge failed">失败</span>'}</td>
+        <td>${c.actual == null ? "—" : esc(c.actual)}${c.unit || ""}</td><td>${esc(c.threshold)}${c.unit || ""}</td><td class="muted">${esc(c.message || "")}</td></tr>`).join("")}
+    </tbody></table>` : ""}`;
 }
 
 $("#btn-refresh").onclick = async () => { await loadAll(); if (currentBuild) selectBuild(currentBuild); };

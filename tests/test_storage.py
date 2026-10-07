@@ -139,8 +139,10 @@ class TestBuildStore(unittest.TestCase):
         self.assertEqual(build["status"], "pending")
         self.store.set_total("b1", 3)
         self.store.finish("b1", "passed")
+        self.store.finalize_status("b1", "passed")
         got = self.store.get("b1")
         self.assertEqual(got["status"], "passed")
+        self.assertEqual(got["test_status"], "passed")
         self.assertEqual(got["total"], 3)
         self.assertGreater(got["duration"], 0)
 

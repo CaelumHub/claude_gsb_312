@@ -32,7 +32,8 @@ class Scheduler:
     """测试并发调度器。"""
 
     def __init__(self, registry, build_registry, executor, env_manager,
-                 report_gen, coverage_analyzer, defect_manager, notify_manager,
+                 report_gen, coverage_analyzer, quality_gate, defect_manager,
+                 notify_manager,
                  max_build_workers: int = 4, max_case_workers: int = 8,
                  tick_seconds: float = 20.0):
         self.registry = registry
@@ -41,6 +42,7 @@ class Scheduler:
         self.env_manager = env_manager
         self.report_gen = report_gen
         self.coverage = coverage_analyzer
+        self.quality_gate = quality_gate
         self.defects = defect_manager
         self.notify = notify_manager
 
@@ -52,6 +54,7 @@ class Scheduler:
             max_workers=max_build_workers, thread_name_prefix="build")
         self._running: dict[str, dict] = {}
         self._running_lock = threading.Lock()
+        self._done_events: dict[str, threading.Event] = {}
 
         self._stop_event = threading.Event()
         self._tick_thread: Optional[threading.Thread] = None
@@ -66,7 +69,15 @@ class Scheduler:
 
     def shutdown(self) -> None:
         self._stop_event.set()
-        self._build_pool.shutdown(wait=False, cancel_futures=True)
+        self._build_pool.shutdown(wait=True, cancel_futures=True)
+        if self._tick_thread is not None:
+            self._tick_thread.join(timeout=1.0)
+        with self._running_lock:
+            events = list(self._done_events.values())
+            self._running.clear()
+            self._done_events.clear()
+        for event in events:
+            event.set()
 
     # ------------------------------------------------------------------ 触发
     def submit_build(self, project_id: str, suite_id: str,
@@ -104,15 +115,18 @@ class Scheduler:
         )
 
         cancel_event = threading.Event()
+        done_event = threading.Event()
         with self._running_lock:
             self._running[build_id] = {
                 "cancel": cancel_event,
                 "project_id": project_id,
                 "suite_id": suite_id,
             }
+            self._done_events[build_id] = done_event
 
         self._build_pool.submit(
-            self._run_build, project_id, build_id, cases, env_id, cancel_event)
+            self._run_build_guarded, project_id, build_id, cases, env_id,
+            cancel_event)
 
         # 若是定时触发，记录一次计划运行历史
         if schedule_id:
@@ -140,11 +154,26 @@ class Scheduler:
                     "total": build.get("total", 0) if build else 0,
                     "passed": build.get("passed", 0) if build else 0,
                     "failed": build.get("failed", 0) if build else 0,
+                    "quality_gate_status": build.get("quality_gate_status") if build else None,
+                    "release_allowed": build.get("release_allowed") if build else None,
                     "started_at": build.get("started_at") if build else None,
                 })
         return out
 
     # ------------------------------------------------------------------ 构建执行
+    def _run_build_guarded(self, *args) -> None:
+        try:
+            self._run_build(*args)
+        except Exception:  # noqa: BLE001
+            # 兜底保证等待者不会因为收尾异常永久阻塞。
+            build_id = args[1] if len(args) > 1 else None
+            if build_id:
+                with self._running_lock:
+                    self._running.pop(build_id, None)
+                    event = self._done_events.pop(build_id, None)
+                if event is not None:
+                    event.set()
+
     def _run_build(self, project_id: str, build_id: str, cases: list,
                    env_id: str, cancel_event: threading.Event) -> None:
         store = self.builds.for_project(project_id)
@@ -209,14 +238,25 @@ class Scheduler:
         else:
             status = "failed"
         store.finish(build_id, status)
-        store.append_log(build_id, f"构建结束: {status}（通过 {build.get('passed', 0)}"
-                                   f"/{build.get('total', 0)}）")
+        store.append_log(build_id, f"用例执行结束: {status}（通过 {build.get('passed', 0)}"
+                                   f"/{build.get('total', 0)}），等待覆盖率门禁")
 
         # 收尾：报告 + 覆盖率 + 通知 + 自动缺陷
         self._finalize(project_id, build_id)
 
         with self._running_lock:
             self._running.pop(build_id, None)
+            event = self._done_events.pop(build_id, None)
+        if event is not None:
+            event.set()
+
+    def wait_build(self, build_id: str, timeout: Optional[float] = None) -> bool:
+        """等待一场构建完成全部收尾（报告、覆盖率和门禁均已落盘）。"""
+        with self._running_lock:
+            event = self._done_events.get(build_id)
+        if event is None:
+            return True
+        return event.wait(timeout)
 
     def _run_one(self, case: dict, env_config: dict, env_id: str,
                  index: int, cancel_event: threading.Event) -> dict:
@@ -243,12 +283,40 @@ class Scheduler:
         passed = build.get("passed", 0)
         passed_ratio = (passed / total) if total else 1.0
 
+        # 先生成覆盖率，再执行门禁；门禁可能把测试通过但覆盖率不达标的构建改判失败。
+        coverage = None
+        gate = None
+        try:
+            coverage = self.coverage.generate(project_id, build_id, passed_ratio)
+        except Exception as exc:  # noqa: BLE001
+            store.append_log(build_id, f"覆盖率生成失败: {exc}")
+
+        try:
+            gate = self.quality_gate.evaluate_build(
+                project_id, build_id, coverage=coverage)
+            if gate.get("gate_status") == "failed":
+                store.append_log(build_id, f"覆盖率门禁未通过，禁止发布: {gate.get('reason', '')}")
+            elif gate.get("gate_status") == "passed":
+                store.append_log(build_id, "覆盖率门禁通过，允许发布")
+        except Exception as exc:  # noqa: BLE001
+            failure_status = "error" if coverage is None else "failed"
+            store.append_log(build_id, f"覆盖率门禁执行失败: {exc}")
+            store.finalize_status(build_id, failure_status)
+
+        final_build = store.get(build_id)
+        release_text = "发布未判定"
+        if final_build.get("release_allowed") is True:
+            release_text = "允许发布"
+        elif final_build.get("release_allowed") is False:
+            release_text = "禁止发布"
+        store.append_log(
+            build_id,
+            f"构建最终状态: {final_build.get('status')} · {release_text}")
+
+        # 门禁已经更新 build.json，最终报告以门禁后的状态重新聚合。
+        build = store.get(build_id)
         try:
             self.report_gen.build_report(project_id, build_id, force=True)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            self.coverage.generate(project_id, build_id, passed_ratio)
         except Exception:  # noqa: BLE001
             pass
 
@@ -262,7 +330,11 @@ class Scheduler:
             "total": total,
             "pass_rate": round(passed_ratio * 100, 1),
             "duration": build.get("duration", 0.0),
+            "quality_gate_status": build.get("quality_gate_status"),
+            "release_allowed": build.get("release_allowed"),
         }
+        if gate:
+            payload["quality_gate_reason"] = gate.get("reason")
         self.notify.fire(project_id, "build.finished", payload)
         self.notify.fire(project_id, event, payload)
 

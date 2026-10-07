@@ -16,6 +16,7 @@ from typing import Optional
 from flask import Blueprint, current_app, jsonify, request
 
 from engine import new_id
+from engine.quality_gate import normalize_coverage_gate
 from engine.executor import TestExecutor
 
 api = Blueprint("api", __name__, url_prefix="/api")
@@ -49,6 +50,10 @@ def _coverage():
     return current_app.config["COVERAGE"]
 
 
+def _quality_gate():
+    return current_app.config["QUALITY_GATE"]
+
+
 def _defects():
     return current_app.config["DEFECTS"]
 
@@ -67,6 +72,26 @@ def _err(msg: str, code: int = 400):
 
 def _store(name: str):
     return _registry().store(name)
+
+
+def _coverage_gate_payload(data: dict) -> dict | None:
+    if "coverage_gate" in data:
+        raw = data.get("coverage_gate")
+        if raw is None:
+            return {"enabled": False}
+        if not isinstance(raw, dict):
+            raise ValueError("coverage_gate 必须是对象")
+        return normalize_coverage_gate(raw)
+    config = {}
+    if "coverage_gate_enabled" in data:
+        config["enabled"] = bool(data.get("coverage_gate_enabled"))
+    if "overall_coverage_threshold" in data:
+        config["overall_threshold"] = data.get("overall_coverage_threshold")
+    if "new_code_coverage_threshold" in data:
+        config["new_code_threshold"] = data.get("new_code_coverage_threshold")
+    if config:
+        return normalize_coverage_gate(config)
+    return None
 
 
 def _build_or_404(build_id: str):
@@ -103,12 +128,17 @@ def create_project():
     name = (data.get("name") or "").strip()
     if not name:
         return _err("项目名称不能为空")
+    try:
+        coverage_gate = _coverage_gate_payload(data)
+    except ValueError as exc:
+        return _err(str(exc))
     project = {
         "id": new_id("proj"),
         "name": name,
         "description": data.get("description", ""),
         "repo_url": data.get("repo_url", ""),
         "auto_create_defects": bool(data.get("auto_create_defects", False)),
+        "coverage_gate": coverage_gate,
         "created_at": time.time(),
     }
     _store("projects").insert(project)
@@ -131,6 +161,12 @@ def update_project(project_id: str):
     data = _payload()
     patch = {k: data[k] for k in ("name", "description", "repo_url",
                                   "auto_create_defects") if k in data}
+    try:
+        coverage_gate = _coverage_gate_payload(data)
+    except ValueError as exc:
+        return _err(str(exc))
+    if coverage_gate is not None:
+        patch["coverage_gate"] = coverage_gate
     updated = _store("projects").update(project_id, patch)
     return jsonify(updated)
 
@@ -465,6 +501,85 @@ def build_coverage(build_id: str):
 @api.get("/projects/<project_id>/coverage/trend")
 def coverage_trend(project_id: str):
     return jsonify(_coverage().trend(project_id))
+
+
+@api.get("/builds/<build_id>/coverage/diff")
+def build_coverage_diff(build_id: str):
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    store = _builds().for_project(build["project_id"])
+    current = _coverage().get(build["project_id"], build_id)
+    baseline_id = request.args.get("baseline_build_id")
+    if not baseline_id:
+        gate = store.read_quality_gate(build_id)
+        baseline_id = (gate or {}).get("baseline_build_id")
+    if not baseline_id:
+        builds = [b for b in store.list_builds()
+                  if b["id"] != build_id
+                  and b.get("created_at", 0) <= build.get("created_at", 0)
+                  and b.get("status") in ("passed", "failed")]
+        if not builds:
+            return _err("没有可对比的上一场构建", 404)
+        baseline_id = sorted(
+            builds,
+            key=lambda b: (b.get("created_at", 0), b.get("finished_at") or 0),
+            reverse=True,
+        )[0]["id"]
+    if store.get(baseline_id) is None:
+        return _err("基线构建不存在", 404)
+    return jsonify(_coverage().diff_coverage(
+        build["project_id"], build_id, baseline_id, current))
+
+
+@api.get("/builds/<build_id>/quality-gate")
+def build_quality_gate(build_id: str):
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    gate = _quality_gate().get_for_build(build["project_id"], build_id)
+    if gate is None:
+        return _err("门禁结论不存在或尚未生成", 404)
+    return jsonify(gate)
+
+
+@api.get("/builds/<build_id>/release-decision")
+def release_decision(build_id: str):
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    gate = _quality_gate().get_for_build(build["project_id"], build_id)
+    if gate is None:
+        return jsonify({
+            "build_id": build_id,
+            "project_id": build["project_id"],
+            "release_allowed": False,
+            "gate_status": "pending",
+            "reason": "门禁尚未生成",
+        })
+    return jsonify({
+        "build_id": build_id,
+        "project_id": build["project_id"],
+        "release_allowed": bool(gate.get("release_allowed")),
+        "gate_status": gate.get("gate_status"),
+        "status": gate.get("status"),
+        "reason": gate.get("reason"),
+        "checks": gate.get("checks", []),
+        "evaluated_at": gate.get("evaluated_at"),
+    })
+
+
+@api.get("/projects/<project_id>/quality-gates")
+def project_quality_gate_history(project_id: str):
+    limit = request.args.get("limit", 50, type=int)
+    return jsonify({"quality_gates": _quality_gate().history(project_id, limit=limit)})
+
+
+@api.get("/quality-gates")
+def all_quality_gate_history():
+    project_id = request.args.get("project_id")
+    limit = request.args.get("limit", 50, type=int)
+    return jsonify({"quality_gates": _quality_gate().history(project_id, limit=limit)})
 
 
 # ---------------------------------------------------------------------------

@@ -11,8 +11,11 @@ PRIORITIES = ["P0", "P1", "P2", "P3"]
 # 用例结果状态（单条）
 CASE_STATUSES = ["passed", "failed", "error", "skipped", "timeout"]
 
-# 构建状态（一次执行）
+# 构建状态（一次执行；覆盖率门禁结束后才进入 passed/failed）
 BUILD_STATUSES = ["pending", "running", "passed", "failed", "cancelled", "error"]
+
+# 覆盖率门禁结论
+QUALITY_GATE_STATUSES = ["passed", "failed", "skipped"]
 
 # 缺陷严重级别与状态流
 SEVERITIES = ["blocker", "critical", "major", "minor", "trivial"]

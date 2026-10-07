@@ -9,6 +9,7 @@ const PAGES = [
   { file: "monitor.html",     name: "执行监控",     desc: "实时日志状态" },
   { file: "reports.html",     name: "测试报告",     desc: "通过率耗时" },
   { file: "coverage.html",    name: "代码覆盖率",   desc: "覆盖率分析" },
+  { file: "quality-gates.html", name: "门禁历史",   desc: "发布判定追溯" },
   { file: "defects.html",     name: "缺陷跟踪",     desc: "缺陷闭环" },
   { file: "environments.html",name: "环境管理",     desc: "配置与依赖" },
   { file: "schedules.html",   name: "定时任务",     desc: "计划与触发" },
@@ -18,6 +19,7 @@ const PAGES = [
 const PAGE_NAMES = {
   projects: "项目管理", cases: "测试用例", suites: "测试套件与分组",
   monitor: "执行监控", reports: "测试报告", coverage: "代码覆盖率",
+  "quality-gates": "门禁历史",
   defects: "缺陷跟踪", environments: "环境管理", schedules: "定时任务与触发",
   notifications: "通知与集成",
 };
@@ -25,6 +27,14 @@ const PAGE_NAMES = {
 const STATUS_LABELS = {
   pending: "等待中", running: "运行中", passed: "通过", failed: "失败",
   cancelled: "已取消", error: "错误", skipped: "跳过", timeout: "超时",
+};
+
+const GATE_LABELS = {
+  passed: "门禁通过", failed: "门禁未过", skipped: "门禁跳过", pending: "待判定",
+};
+
+const RELEASE_LABELS = {
+  true: "允许发布", false: "禁止发布", null: "未判定",
 };
 
 const PRIORITY_LABELS = { P0: "P0 · 最高", P1: "P1 · 高", P2: "P2 · 中", P3: "P3 · 低" };
@@ -113,6 +123,18 @@ function badge(status, label) {
 
 function statusBadge(status) {
   return badge(status, STATUS_LABELS[status] || status);
+}
+
+function gateBadge(status) {
+  const s = status || "pending";
+  const cls = s === "passed" ? "ok" : s === "failed" ? "failed" : "skipped";
+  return `<span class="badge ${cls}">${esc(GATE_LABELS[s] || s)}</span>`;
+}
+
+function releaseBadge(allowed) {
+  if (allowed === true) return '<span class="badge ok">允许发布</span>';
+  if (allowed === false) return '<span class="badge failed">禁止发布</span>';
+  return '<span class="badge skipped">未判定</span>';
 }
 
 function priorityBadge(p) {

@@ -100,6 +100,8 @@ class ReportGenerator:
             "by_priority": build.get("by_priority", {}),
             "slowest": self._slowest(store, build_id, 10),
             "failures": self._failures(store, build_id, 50),
+            "quality_gate": store.read_quality_gate(build_id),
+            "release_allowed": build.get("release_allowed"),
             "generated_at": time.time(),
         }
         return report
@@ -148,6 +150,10 @@ class ReportGenerator:
                 "passed": b.get("passed", 0),
                 "failed": b.get("failed", 0) + b.get("error", 0) + b.get("timeout", 0),
                 "pass_rate": round(b.get("passed", 0) / finished * 100, 1) if finished else 0,
+                "quality_gate_status": b.get("quality_gate_status"),
+                "release_allowed": b.get("release_allowed"),
+                "new_code_coverage": (b.get("quality_gate") or {}).get("new_code_coverage"),
+                "overall_coverage": (b.get("quality_gate") or {}).get("overall_coverage"),
                 "duration": b.get("duration", 0.0),
                 "finished_at": b.get("finished_at"),
             })
@@ -160,9 +166,13 @@ class ReportGenerator:
     def _aggregate(self, builds: list[dict]) -> dict:
         if not builds:
             return {"total_builds": 0, "avg_pass_rate": 0.0, "avg_duration": 0.0,
-                    "total_passed": 0, "total_cases": 0}
+                    "total_passed": 0, "total_cases": 0, "gate_pass_rate": 0.0,
+                    "releasable_builds": 0}
         rates, durations = [], []
         tp = tc = 0
+        gate_evaluated = 0
+        gate_passed = 0
+        releasable = 0
         for b in builds:
             finished = b.get("total", 0) - b.get("skipped", 0)
             if finished:
@@ -171,10 +181,19 @@ class ReportGenerator:
                 durations.append(b["duration"])
             tp += b.get("passed", 0)
             tc += b.get("total", 0)
+            if b.get("quality_gate_status") in ("passed", "failed"):
+                gate_evaluated += 1
+                if b.get("quality_gate_status") == "passed":
+                    gate_passed += 1
+            if b.get("release_allowed") is True:
+                releasable += 1
         return {
             "total_builds": len(builds),
             "avg_pass_rate": round(statistics.mean(rates), 1) if rates else 0.0,
             "avg_duration": round(statistics.mean(durations), 3) if durations else 0.0,
             "total_passed": tp,
             "total_cases": tc,
+            "gate_pass_rate": round(gate_passed / gate_evaluated * 100, 1)
+            if gate_evaluated else 0.0,
+            "releasable_builds": releasable,
         }

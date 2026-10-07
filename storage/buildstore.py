@@ -19,6 +19,7 @@
       build.log           追加式实时日志（行号即序号）
       <case_id>.log       单个用例日志（报告详情用）
     coverage.json         覆盖率快照（生成后缓存）
+    quality_gate.json     覆盖率门禁结论（阈值判定 / 发布判定）
     report.json           报告缓存（结果变化后失效重算）
     .build.lock           本构建的写锁文件
 
@@ -72,6 +73,9 @@ def _empty_build(build_id: str, project_id: str, **kw: Any) -> dict:
         "by_group": {},
         "by_priority": {},
         "durations": [],
+        "quality_gate_status": None,
+        "release_allowed": None,
+        "test_status": None,
         "created_at": time.time(),
     }
     return build
@@ -148,15 +152,48 @@ class BuildStore:
                                       "started_at": time.time()})
 
     def finish(self, build_id: str, status: str) -> dict:
-        """结束构建：写入终态、结束时间与总耗时。"""
+        """结束用例执行，记录测试结果；门禁评估完成前仍保持 running。
+
+        前端 / 轮询只有在覆盖率门禁也结束后才能看到 passed/failed，避免
+        “构建已经结束但发布判定尚未生成”的竞态窗口。
+        """
         with FileLock(self._lock(build_id)):
             build = read_json(self._build_path(build_id), _empty_build(build_id, self.project_id))
-            build["status"] = status
+            build["test_status"] = status
             build["finished_at"] = time.time()
             if build.get("started_at"):
                 build["duration"] = round(build["finished_at"] - build["started_at"], 3)
             atomic_write_json(self._build_path(build_id), build)
             return build
+
+    def finalize_status(self, build_id: str, status: str) -> dict:
+        """写入构建最终状态。"""
+        with FileLock(self._lock(build_id)):
+            build = read_json(self._build_path(build_id), _empty_build(build_id, self.project_id))
+            build["status"] = status
+            build["test_status"] = build.get("test_status") or status
+            atomic_write_json(self._build_path(build_id), build)
+            return build
+
+    def apply_quality_gate(self, build_id: str, gate: dict) -> dict:
+        """应用门禁结论：持久化终态、发布判定和门禁摘要。"""
+        patch = {
+            "status": gate.get("status"),
+            "quality_gate_status": gate.get("gate_status"),
+            "release_allowed": gate.get("release_allowed"),
+            "quality_gate": {
+                "gate_status": gate.get("gate_status"),
+                "release_allowed": gate.get("release_allowed"),
+                "reason": gate.get("reason"),
+                "thresholds": gate.get("thresholds", {}),
+                "checks": gate.get("checks", []),
+                "baseline_build_id": gate.get("baseline_build_id"),
+                "overall_coverage": (gate.get("coverage") or {}).get("percent"),
+                "new_code_coverage": (gate.get("diff_coverage") or {}).get("percent"),
+                "evaluated_at": gate.get("evaluated_at"),
+            },
+        }
+        return self.update(build_id, patch)
 
     def list_builds(self) -> list[dict]:
         """列出本项目所有构建，按创建时间倒序。"""
@@ -366,6 +403,14 @@ class BuildStore:
 
     def read_coverage(self, build_id: str) -> Optional[dict]:
         path = os.path.join(self._build_dir(build_id), "coverage.json")
+        return read_json(path, None)
+
+    def write_quality_gate(self, build_id: str, gate: dict) -> None:
+        with FileLock(self._lock(build_id)):
+            atomic_write_json(os.path.join(self._build_dir(build_id), "quality_gate.json"), gate)
+
+    def read_quality_gate(self, build_id: str) -> Optional[dict]:
+        path = os.path.join(self._build_dir(build_id), "quality_gate.json")
         return read_json(path, None)
 
     def write_report(self, build_id: str, report: dict) -> None:

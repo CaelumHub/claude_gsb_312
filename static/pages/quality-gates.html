@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>门禁历史 - 自动化测试与持续集成平台</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="site-sidebar"></aside>
+
+  <main class="main">
+    <h1 class="page-title">覆盖率门禁历史</h1>
+    <p class="page-desc">回溯每场构建的总覆盖率、新增代码覆盖率、失败检查项与最终发布判定。</p>
+
+    <section class="card">
+      <div class="row">
+        <label style="margin:0 6px 0 0;align-self:center">项目</label>
+        <select id="project-select" style="max-width:260px" onchange="switchProject(this.value)"></select>
+        <span style="flex:1"></span>
+        <button class="btn secondary" id="btn-refresh">刷新</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>历史结论</h2>
+      <div id="history"><div class="empty">加载中…</div></div>
+    </section>
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script>
+renderNav("quality-gates.html");
+
+let projectId = null;
+
+async function init() {
+  const params = new URLSearchParams(location.search);
+  projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
+  await loadHistory();
+}
+
+async function switchProject(id) { projectId = id; await loadHistory(); }
+
+async function loadHistory() {
+  if (!projectId) return;
+  const host = $("#history");
+  host.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const d = await api(`/api/projects/${projectId}/quality-gates?limit=100`);
+    const gates = d.quality_gates || [];
+    if (!gates.length) {
+      host.innerHTML = '<div class="empty">暂无门禁结论。完成一场构建后会自动生成。</div>';
+      return;
+    }
+    host.innerHTML = `<table>
+      <thead><tr><th>时间</th><th>构建</th><th>测试状态</th><th>门禁</th><th>发布</th><th>总覆盖率</th><th>新增代码</th><th>基线</th><th>结论</th></tr></thead>
+      <tbody>${gates.map(g => {
+        const diff = g.diff_coverage || {};
+        return `<tr>
+          <td class="mono" style="font-size:12px">${fmtTime(g.evaluated_at)}</td>
+          <td><a href="/page/reports.html?project_id=${g.project_id}&build_id=${g.build_id}">${esc(g.build_name || g.build_id)}</a><div class="mono muted" style="font-size:11px">${esc(g.build_id)}</div></td>
+          <td>${statusBadge(g.test_status || g.status)}</td>
+          <td>${gateBadge(g.gate_status)}</td>
+          <td>${releaseBadge(g.release_allowed)}</td>
+          <td><strong>${g.coverage?.percent ?? "—"}%</strong><div class="muted" style="font-size:11px">阈值 ${g.thresholds?.overall_coverage ?? "—"}%</div></td>
+          <td>${diff.has_changes ? `<strong>${diff.percent}%</strong><div class="muted" style="font-size:11px">${diff.covered_lines}/${diff.changed_lines} 行 · 阈值 ${g.thresholds?.new_code_coverage ?? "—"}%</div>` : "跳过"}</td>
+          <td class="mono" style="font-size:11px">${g.baseline_build_id ? esc(g.baseline_name || g.baseline_build_id) : "—"}</td>
+          <td class="muted" style="font-size:12px">${esc(g.reason || "—")}</td>
+        </tr>`;
+      }).join("")}</tbody>
+    </table>`;
+  } catch (e) {
+    host.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+$("#btn-refresh").onclick = loadHistory;
+init();
+</script>
+</body>
+</html>
