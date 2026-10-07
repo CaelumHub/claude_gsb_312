@@ -19,7 +19,7 @@
 
   <main class="main">
     <h1 class="page-title">代码覆盖率</h1>
-    <p class="page-desc">按构建查看模拟源码树的覆盖率，覆盖率与通过率弱相关、同一构建结果稳定。</p>
+    <p class="page-desc">按构建查看模拟源码树的覆盖率，覆盖率与通过率弱相关、同一构建结果稳定。可配置覆盖率门禁，不达标则构建不通过。</p>
 
     <div class="card">
       <div class="row">
@@ -46,6 +46,11 @@
       <h2>覆盖率趋势</h2>
       <div id="trend"><div class="empty">加载中…</div></div>
     </section>
+
+    <section class="card">
+      <h2>门禁历史 <span class="muted" style="font-size:12px;font-weight:400">历次覆盖率门禁结论，可回溯</span></h2>
+      <div id="gate-history"><div class="empty">加载中…</div></div>
+    </section>
   </main>
 </div>
 
@@ -68,7 +73,7 @@ async function switchProject(id) { projectId = id; currentBuild = null; await lo
 
 async function loadAll() {
   if (!projectId) return;
-  await Promise.all([loadBuilds(), loadTrend()]);
+  await Promise.all([loadBuilds(), loadTrend(), loadGateHistory()]);
 }
 
 async function loadBuilds() {
@@ -78,7 +83,7 @@ async function loadBuilds() {
   if (!builds.length) { host.innerHTML = '<div class="empty">暂无构建，先执行一次测试。</div>'; return; }
   host.innerHTML = builds.map(b => `
     <div class="build-item ${b.id===currentBuild?'active':''}" onclick="selectBuild('${b.id}')">
-      <div class="row spread"><strong>${esc(b.name||b.id)}</strong>${statusBadge(b.status)}</div>
+      <div class="row spread"><strong>${esc(b.name||b.id)}</strong><span>${statusBadge(b.status)} ${gateBadge(b.gate_status)}</span></div>
       <div class="muted" style="font-size:12px">通过率 ${b.total?Math.round(b.passed/b.total*100):0}% · ${fmtTime(b.finished_at)}</div>
     </div>`).join("");
 }
@@ -88,35 +93,114 @@ async function loadTrend() {
   const pts = d.points || [];
   const host = $("#trend");
   if (!pts.length) { host.innerHTML = '<div class="empty">暂无覆盖率数据</div>'; return; }
-  host.innerHTML = `<table><thead><tr><th>构建</th><th>状态</th><th>覆盖率</th><th>通过率</th></tr></thead><tbody>` +
+  host.innerHTML = `<table><thead><tr><th>构建</th><th>状态</th><th>总覆盖率</th><th>新增代码覆盖率</th><th>通过率</th></tr></thead><tbody>` +
     pts.map(p => `<tr><td class="mono" style="font-size:12px">${esc(p.name||p.build_id)}</td>
       <td>${statusBadge(p.status)}</td><td><strong>${p.percent}%</strong></td>
+      <td>${p.new_code_percent == null ? "—" : p.new_code_percent + "%"}</td>
       <td>${Math.round(p.passed_ratio*100)}%</td></tr>`).join("") + "</tbody></table>";
+}
+
+async function loadGateHistory() {
+  const d = await api(`/api/projects/${projectId}/gates/history?limit=30`);
+  const gates = d.gates || [];
+  const host = $("#gate-history");
+  if (!gates.length) { host.innerHTML = '<div class="empty">暂无门禁评估记录</div>'; return; }
+  host.innerHTML = `<table><thead><tr><th>构建</th><th>结论</th><th>总覆盖率</th><th>新增代码覆盖率</th><th>阈值</th><th>发布判定</th><th>评估时间</th></tr></thead><tbody>` +
+    gates.map(g => {
+      const t = g.thresholds || {};
+      const th = [t.min_total_percent != null ? `总≥${t.min_total_percent}%` : "",
+                  t.min_new_code_percent != null ? `新增≥${t.min_new_code_percent}%` : ""].filter(Boolean).join(" · ") || "—";
+      return `<tr>
+        <td class="mono" style="font-size:12px">${esc(g.build_name || g.build_id)}</td>
+        <td>${gateBadge(g.status)}</td>
+        <td>${g.total_percent ?? "—"}%</td>
+        <td>${g.new_code_percent == null ? "—" : g.new_code_percent + "%"}</td>
+        <td class="muted" style="font-size:12px">${esc(th)}</td>
+        <td>${releaseBadge(g.release)}</td>
+        <td class="mono" style="font-size:12px">${fmtTime(g.evaluated_at)}</td>
+      </tr>`;
+    }).join("") + "</tbody></table>";
 }
 
 async function selectBuild(id) {
   currentBuild = id;
   loadBuilds();
-  const c = await api(`/api/builds/${id}/coverage`);
-  renderCoverage(c);
+  const [c, gate] = await Promise.all([
+    api(`/api/builds/${id}/coverage`),
+    api(`/api/builds/${id}/gate`).catch(() => null),
+  ]);
+  renderCoverage(c, gate);
+  await loadDiff(id, "");
 }
 
-function renderCoverage(c) {
+function renderCoverage(c, gate) {
   $("#cov-title").textContent = `覆盖率详情 · ${c.percent}%`;
   const files = c.files || [];
   $("#cov-body").innerHTML = `
+    ${gate ? renderGate(gate) : ""}
     <div class="grid cols-3 mt">
       <div class="stat primary"><div class="v">${c.percent}%</div><div class="k">总体覆盖率</div></div>
       <div class="stat good"><div class="v">${c.covered_lines}</div><div class="k">覆盖行</div></div>
       <div class="stat bad"><div class="v">${c.missed_lines}</div><div class="k">未覆盖行</div></div>
     </div>
-    <div class="mt">${files.map(f => `
+    <div class="mt"><h3>新增代码覆盖率（对比两次构建）</h3>
+      <div class="row" style="gap:8px;align-items:center">
+        <label style="margin:0">基线构建</label>
+        <select id="base-select" style="max-width:260px" onchange="loadDiff('${c.build_id}', this.value)">
+          <option value="">上一次构建（默认）</option>
+          ${builds.filter(b => b.id !== c.build_id).map(b =>
+            `<option value="${b.id}">${esc(b.name || b.id)}</option>`).join("")}
+        </select>
+      </div>
+      <div id="diff-body" class="mt"><div class="empty">加载中…</div></div>
+    </div>
+    <div class="mt"><h3>文件明细</h3>${files.map(f => `
       <div class="cov-row">
         <span class="fname" title="${esc(f.file)}">${esc(f.file)}</span>
         <div class="bar ${f.percent>=80?'green':f.percent>=50?'amber':'red'}"><i style="width:${f.percent}%"></i></div>
         <span class="pct">${f.percent}%</span>
       </div>`).join("")}</div>
     <div class="mt muted" style="font-size:12px">模拟源码树 · 共 ${c.total_lines} 行，覆盖 ${c.covered_lines} 行。</div>`;
+}
+
+function renderGate(g) {
+  const checks = g.checks || [];
+  return `<div class="mt" style="border:1px solid var(--border);border-radius:9px;padding:10px 12px">
+    <div class="row spread">
+      <strong>覆盖率门禁</strong>
+      <span>${gateBadge(g.status)} ${releaseBadge(g.release)}</span>
+    </div>
+    ${checks.length ? `<table class="mt"><thead><tr><th>检查项</th><th>实际</th><th>阈值</th><th>结果</th></tr></thead><tbody>
+      ${checks.map(c => `<tr><td>${esc(c.name)}</td><td>${c.actual == null ? "—" : c.actual + "%"}</td>
+        <td>≥ ${c.expected}%</td><td>${c.ok ? '<span class="badge passed">通过</span>' : '<span class="badge failed">不达标</span>'}
+        ${c.note ? `<span class="muted" style="font-size:12px"> ${esc(c.note)}</span>` : ""}</td></tr>`).join("")}
+    </tbody></table>` : '<div class="muted mt" style="font-size:13px">未配置阈值，仅记录覆盖率。</div>'}
+  </div>`;
+}
+
+async function loadDiff(buildId, base) {
+  const host = $("#diff-body");
+  if (!host) return;
+  const d = await api(`/api/builds/${buildId}/coverage/diff${base ? `?base=${base}` : ""}`);
+  if (d.error) { host.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
+  const files = d.files || [];
+  host.innerHTML = `
+    ${d.note ? `<div class="muted" style="font-size:12px">${esc(d.note)}</div>` : ""}
+    <div class="grid cols-3 mt">
+      <div class="stat ${d.percent == null ? "" : d.percent >= 80 ? "good" : d.percent >= 50 ? "primary" : "bad"}">
+        <div class="v">${d.percent == null ? "—" : d.percent + "%"}</div><div class="k">新增代码覆盖率</div></div>
+      <div class="stat"><div class="v">${d.changed_lines}</div><div class="k">新增/改动行</div></div>
+      <div class="stat ${d.delta_percent == null ? "" : d.delta_percent >= 0 ? "good" : "bad"}">
+        <div class="v">${d.delta_percent == null ? "—" : (d.delta_percent >= 0 ? "+" : "") + d.delta_percent + "%"}</div>
+        <div class="k">总覆盖率较基线${d.base_percent != null ? `（${d.base_percent}%）` : ""}</div></div>
+    </div>
+    ${files.length ? `<div class="mt">${files.map(f => `
+      <div class="cov-row">
+        <span class="fname" title="${esc(f.file)}">${esc(f.file)}</span>
+        <div class="bar ${f.percent>=80?'green':f.percent>=50?'amber':'red'}"><i style="width:${f.percent}%"></i></div>
+        <span class="pct">${f.percent}% <span class="muted">(${f.covered}/${f.changed})</span></span>
+      </div>`).join("")}</div>`
+    : '<div class="empty">相对基线没有新增/改动代码</div>'}`;
 }
 
 $("#btn-refresh").onclick = async () => { await loadAll(); if (currentBuild) selectBuild(currentBuild); };

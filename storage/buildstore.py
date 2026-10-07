@@ -19,6 +19,7 @@
       build.log           追加式实时日志（行号即序号）
       <case_id>.log       单个用例日志（报告详情用）
     coverage.json         覆盖率快照（生成后缓存）
+    gate.json             覆盖率门禁结论（评估后缓存，随构建可回溯）
     report.json           报告缓存（结果变化后失效重算）
     .build.lock           本构建的写锁文件
 
@@ -374,6 +375,15 @@ class BuildStore:
 
     def read_report(self, build_id: str) -> Optional[dict]:
         path = os.path.join(self._build_dir(build_id), "report.json")
+        return read_json(path, None)
+
+    # -- 覆盖率门禁结论 ----------------------------------------------------
+    def write_gate(self, build_id: str, conclusion: dict) -> None:
+        with FileLock(self._lock(build_id)):
+            atomic_write_json(os.path.join(self._build_dir(build_id), "gate.json"), conclusion)
+
+    def read_gate(self, build_id: str) -> Optional[dict]:
+        path = os.path.join(self._build_dir(build_id), "gate.json")
         return read_json(path, None)
 
 

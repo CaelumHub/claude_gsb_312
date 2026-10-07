@@ -27,6 +27,8 @@ const STATUS_LABELS = {
   cancelled: "已取消", error: "错误", skipped: "跳过", timeout: "超时",
 };
 
+const GATE_LABELS = { passed: "门禁通过", failed: "门禁未通过", disabled: "门禁未启用" };
+
 const PRIORITY_LABELS = { P0: "P0 · 最高", P1: "P1 · 高", P2: "P2 · 中", P3: "P3 · 低" };
 
 /* ---------- 导航注入 ---------- */
@@ -113,6 +115,21 @@ function badge(status, label) {
 
 function statusBadge(status) {
   return badge(status, STATUS_LABELS[status] || status);
+}
+
+/* 覆盖率门禁徽标：disabled 复用 skipped 的灰色样式 */
+function gateBadge(status) {
+  if (!status) return "";
+  const cls = status === "disabled" ? "skipped" : status;
+  return `<span class="badge ${cls}">${esc(GATE_LABELS[status] || status)}</span>`;
+}
+
+/* 发布判定徽标 */
+function releaseBadge(decision) {
+  if (!decision) return "";
+  return decision === "allow"
+    ? '<span class="badge passed">允许发布</span>'
+    : '<span class="badge failed">阻止发布</span>';
 }
 
 function priorityBadge(p) {

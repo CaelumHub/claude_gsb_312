@@ -49,6 +49,10 @@ def _coverage():
     return current_app.config["COVERAGE"]
 
 
+def _gate():
+    return current_app.config["GATE"]
+
+
 def _defects():
     return current_app.config["DEFECTS"]
 
@@ -111,6 +115,12 @@ def create_project():
         "auto_create_defects": bool(data.get("auto_create_defects", False)),
         "created_at": time.time(),
     }
+    if "coverage_gate" in data:
+        from engine.gate import validate_gate_config
+        config, err = validate_gate_config(data["coverage_gate"])
+        if err:
+            return _err(err)
+        project["coverage_gate"] = config
     _store("projects").insert(project)
     return jsonify(project)
 
@@ -131,6 +141,12 @@ def update_project(project_id: str):
     data = _payload()
     patch = {k: data[k] for k in ("name", "description", "repo_url",
                                   "auto_create_defects") if k in data}
+    if "coverage_gate" in data:
+        from engine.gate import validate_gate_config
+        config, err = validate_gate_config(data["coverage_gate"])
+        if err:
+            return _err(err)
+        patch["coverage_gate"] = config
     updated = _store("projects").update(project_id, patch)
     return jsonify(updated)
 
@@ -465,6 +481,68 @@ def build_coverage(build_id: str):
 @api.get("/projects/<project_id>/coverage/trend")
 def coverage_trend(project_id: str):
     return jsonify(_coverage().trend(project_id))
+
+
+@api.get("/builds/<build_id>/coverage/diff")
+def coverage_diff(build_id: str):
+    """新增代码覆盖率：对比两次构建，算出本次改动代码被覆盖了多少。"""
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    base = request.args.get("base") or None
+    result = _coverage().diff(build["project_id"], build_id, base_build_id=base)
+    if "error" in result:
+        return _err(result["error"])
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# 覆盖率门禁
+# ---------------------------------------------------------------------------
+
+@api.get("/projects/<project_id>/gate")
+def get_gate_config(project_id: str):
+    if _store("projects").get(project_id) is None:
+        return _err("项目不存在", 404)
+    return jsonify(_gate().get_config(project_id))
+
+
+@api.put("/projects/<project_id>/gate")
+def put_gate_config(project_id: str):
+    result = _gate().save_config(project_id, _payload())
+    if "error" in result:
+        return _err(result["error"], 404 if result["error"] == "项目不存在" else 400)
+    return jsonify(result["config"])
+
+
+@api.get("/projects/<project_id>/gates/history")
+def gate_history(project_id: str):
+    """历史门禁结论（可回溯）。"""
+    limit = request.args.get("limit", 50, type=int)
+    return jsonify({"project_id": project_id, "gates": _gate().history(project_id, limit)})
+
+
+@api.get("/builds/<build_id>/gate")
+def build_gate(build_id: str):
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    conclusion = _gate().get_conclusion(build["project_id"], build_id)
+    if conclusion is None:
+        return _err("该构建尚未评估门禁", 404)
+    return jsonify(conclusion)
+
+
+@api.post("/builds/<build_id>/gate/evaluate")
+def evaluate_gate(build_id: str):
+    """手动（重新）评估一次构建的覆盖率门禁。"""
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    conclusion = _gate().evaluate(build["project_id"], build_id)
+    if "error" in conclusion:
+        return _err(conclusion["error"])
+    return jsonify(conclusion)
 
 
 # ---------------------------------------------------------------------------

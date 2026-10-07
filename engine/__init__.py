@@ -7,6 +7,7 @@
 - :mod:`engine.cron`        5 段 cron 表达式匹配（定时触发）
 - :mod:`engine.environments`环境管理（配置、依赖解析、工作区隔离）
 - :mod:`engine.coverage`    代码覆盖率分析（模拟，按构建稳定生成）
+- :mod:`engine.gate`        覆盖率门禁（阈值配置、评估、结论与发布判定）
 - :mod:`engine.report`      测试报告生成（通过率 / 耗时 / 分组 / 趋势）
 - :mod:`engine.defects`     缺陷跟踪
 - :mod:`engine.notify`      通知与集成
@@ -24,6 +25,7 @@ from .cron import CronSchedule, cron_matches, parse_cron
 from .executor import TestExecutor, ExecutionError
 from .environments import EnvironmentManager
 from .coverage import CoverageAnalyzer
+from .gate import CoverageGate
 from .report import ReportGenerator
 from .defects import DefectManager
 from .notify import NotificationManager
@@ -42,6 +44,7 @@ __all__ = [
     "ExecutionError",
     "EnvironmentManager",
     "CoverageAnalyzer",
+    "CoverageGate",
     "ReportGenerator",
     "DefectManager",
     "NotificationManager",

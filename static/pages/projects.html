@@ -46,9 +46,48 @@
           <input type="checkbox" id="np-auto" style="width:auto"> 构建失败时自动把失败用例转为缺陷
         </label>
       </div>
+      <div class="mt">
+        <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;color:var(--text)">
+          <input type="checkbox" id="np-gate-enabled" style="width:auto"> 启用覆盖率门禁（不达标则构建不通过）
+        </label>
+        <div class="grid cols-2 mt" id="np-gate-fields" style="display:none">
+          <div>
+            <label>总覆盖率阈值（%）</label>
+            <input type="number" id="np-gate-total" min="0" max="100" step="0.1" placeholder="例如 70">
+          </div>
+          <div>
+            <label>新增代码覆盖率阈值（%）</label>
+            <input type="number" id="np-gate-new" min="0" max="100" step="0.1" placeholder="例如 80">
+          </div>
+        </div>
+      </div>
       <div class="row mt">
         <button class="btn" id="btn-create">创建</button>
         <button class="btn secondary" id="btn-cancel">取消</button>
+      </div>
+    </section>
+
+    <section class="card" id="gate-card" style="display:none">
+      <h2 style="margin:0">覆盖率门禁 · <span id="gate-proj-name"></span></h2>
+      <p class="muted" style="font-size:13px">构建结束后自动评估：任一阈值不达标则构建标记为不通过，并阻止发布。</p>
+      <div class="mt">
+        <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;color:var(--text)">
+          <input type="checkbox" id="gate-enabled" style="width:auto"> 启用覆盖率门禁
+        </label>
+      </div>
+      <div class="grid cols-2 mt">
+        <div>
+          <label>总覆盖率阈值（%）</label>
+          <input type="number" id="gate-total" min="0" max="100" step="0.1" placeholder="留空表示不检查">
+        </div>
+        <div>
+          <label>新增代码覆盖率阈值（%）</label>
+          <input type="number" id="gate-new" min="0" max="100" step="0.1" placeholder="留空表示不检查">
+        </div>
+      </div>
+      <div class="row mt">
+        <button class="btn" id="btn-gate-save">保存门禁配置</button>
+        <button class="btn secondary" id="btn-gate-cancel">取消</button>
       </div>
     </section>
   </main>
@@ -70,12 +109,13 @@ async function load() {
   }
   host.innerHTML = `
     <table>
-      <thead><tr><th>名称</th><th>描述</th><th>用例</th><th>套件</th><th>构建</th><th>创建时间</th><th>操作</th></tr></thead>
+      <thead><tr><th>名称</th><th>描述</th><th>覆盖率门禁</th><th>用例</th><th>套件</th><th>构建</th><th>创建时间</th><th>操作</th></tr></thead>
       <tbody>
         ${projects.map(p => `
           <tr>
             <td><strong>${esc(p.name)}</strong></td>
             <td class="muted">${esc(p.description || "—")}</td>
+            <td>${gateSummary(p.coverage_gate)}</td>
             <td>${p.case_count}</td>
             <td>${p.suite_count}</td>
             <td>${p.build_count}</td>
@@ -85,6 +125,7 @@ async function load() {
                 <a class="btn small secondary" href="/page/cases.html?project_id=${p.id}">用例</a>
                 <a class="btn small secondary" href="/page/suites.html?project_id=${p.id}">套件</a>
                 <a class="btn small secondary" href="/page/reports.html?project_id=${p.id}">报告</a>
+                <button class="btn small secondary" onclick="editGate('${p.id}')">门禁</button>
                 <button class="btn small danger" onclick="removeProject('${p.id}')">删除</button>
               </div>
             </td>
@@ -92,6 +133,46 @@ async function load() {
       </tbody>
     </table>`;
 }
+
+function gateSummary(g) {
+  if (!g || !g.enabled) return '<span class="muted">未启用</span>';
+  const parts = [];
+  if (g.min_total_percent != null) parts.push(`总 ≥${g.min_total_percent}%`);
+  if (g.min_new_code_percent != null) parts.push(`新增 ≥${g.min_new_code_percent}%`);
+  return `<span class="badge blue">${esc(parts.join(" · ") || "已启用")}</span>`;
+}
+
+let gateProjectId = null;
+
+function editGate(id) {
+  const p = projects.find(x => x.id === id);
+  if (!p) return;
+  gateProjectId = id;
+  const g = p.coverage_gate || {};
+  $("#gate-proj-name").textContent = p.name;
+  $("#gate-enabled").checked = !!g.enabled;
+  $("#gate-total").value = g.min_total_percent ?? "";
+  $("#gate-new").value = g.min_new_code_percent ?? "";
+  $("#gate-card").style.display = "block";
+  $("#gate-card").scrollIntoView({ behavior: "smooth" });
+}
+
+$("#btn-gate-cancel").onclick = () => { $("#gate-card").style.display = "none"; };
+
+$("#btn-gate-save").onclick = async () => {
+  if (!gateProjectId) return;
+  const body = {
+    enabled: $("#gate-enabled").checked,
+    min_total_percent: $("#gate-total").value === "" ? null : Number($("#gate-total").value),
+    min_new_code_percent: $("#gate-new").value === "" ? null : Number($("#gate-new").value),
+  };
+  try {
+    await api(`/api/projects/${gateProjectId}/gate`, { method: "PUT", body });
+    toast("门禁配置已保存，下次构建生效");
+    $("#gate-card").style.display = "none";
+    load();
+  } catch (e) { toast(e.message, "error"); }
+};
 
 async function removeProject(id) {
   if (!confirm("确认删除该项目？相关用例、套件、构建将一并移除。")) return;
@@ -106,14 +187,28 @@ $("#btn-cancel").onclick = () => { $("#new-card").style.display = "none"; };
 $("#btn-create").onclick = async () => {
   const name = $("#np-name").value.trim();
   if (!name) return toast("请输入项目名称", "error");
-  await api("/api/projects", { method: "POST", body: {
+  const body = {
     name, description: $("#np-desc").value, repo_url: $("#np-repo").value,
     auto_create_defects: $("#np-auto").checked,
-  }});
+  };
+  if ($("#np-gate-enabled").checked) {
+    body.coverage_gate = {
+      enabled: true,
+      min_total_percent: $("#np-gate-total").value === "" ? null : Number($("#np-gate-total").value),
+      min_new_code_percent: $("#np-gate-new").value === "" ? null : Number($("#np-gate-new").value),
+    };
+  }
+  try {
+    await api("/api/projects", { method: "POST", body });
+  } catch (e) { return toast(e.message, "error"); }
   toast("项目已创建");
   $("#np-name").value = ""; $("#np-desc").value = ""; $("#np-repo").value = "";
   $("#new-card").style.display = "none";
   load();
+};
+
+$("#np-gate-enabled").onchange = (e) => {
+  $("#np-gate-fields").style.display = e.target.checked ? "" : "none";
 };
 
 $("#btn-seed").onclick = async () => {

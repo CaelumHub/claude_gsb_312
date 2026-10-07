@@ -34,7 +34,7 @@ class Scheduler:
     def __init__(self, registry, build_registry, executor, env_manager,
                  report_gen, coverage_analyzer, defect_manager, notify_manager,
                  max_build_workers: int = 4, max_case_workers: int = 8,
-                 tick_seconds: float = 20.0):
+                 tick_seconds: float = 20.0, gate=None):
         self.registry = registry
         self.builds = build_registry
         self.executor = executor
@@ -43,6 +43,7 @@ class Scheduler:
         self.coverage = coverage_analyzer
         self.defects = defect_manager
         self.notify = notify_manager
+        self.gate = gate
 
         self.max_build_workers = max_build_workers
         self.max_case_workers = max_case_workers
@@ -244,11 +245,21 @@ class Scheduler:
         passed_ratio = (passed / total) if total else 1.0
 
         try:
-            self.report_gen.build_report(project_id, build_id, force=True)
+            self.coverage.generate(project_id, build_id, passed_ratio)
         except Exception:  # noqa: BLE001
             pass
+
+        # 覆盖率门禁：不达标则把构建标记为不通过，结论进入报告与发布判定
+        if self.gate is not None and build.get("status") != "cancelled":
+            try:
+                self.gate.evaluate(project_id, build_id)
+                build = store.get(build_id)  # 门禁可能改写了构建状态
+            except Exception:  # noqa: BLE001
+                pass
+
+        # 报告在门禁之后生成，把门禁结论与发布判定一并写入
         try:
-            self.coverage.generate(project_id, build_id, passed_ratio)
+            self.report_gen.build_report(project_id, build_id, force=True)
         except Exception:  # noqa: BLE001
             pass
 
@@ -258,6 +269,7 @@ class Scheduler:
             "build_id": build_id,
             "project_id": project_id,
             "status": build["status"],
+            "gate_status": build.get("gate_status"),
             "passed": passed,
             "total": total,
             "pass_rate": round(passed_ratio * 100, 1),
@@ -265,6 +277,8 @@ class Scheduler:
         }
         self.notify.fire(project_id, "build.finished", payload)
         self.notify.fire(project_id, event, payload)
+        if build.get("gate_status") == "failed":
+            self.notify.fire(project_id, "gate.failed", payload)
 
         # 自动缺陷（项目配置开启时，把失败用例转成缺陷）
         project = self.registry.store("projects").get(project_id)

@@ -21,6 +21,11 @@ def seed_demo_data(registry, env_mgr, notify_mgr) -> dict:
         "description": "内置示例用例、套件、环境与通知集成的演示项目。",
         "repo_url": "https://example.com/demo",
         "auto_create_defects": True,
+        "coverage_gate": {
+            "enabled": True,
+            "min_total_percent": 65.0,
+            "min_new_code_percent": 70.0,
+        },
         "created_at": time.time(),
     }
     registry.store("projects").insert(proj)
@@ -131,7 +136,7 @@ def seed_demo_data(registry, env_mgr, notify_mgr) -> dict:
         "type": "webhook",
         "name": "CI Webhook",
         "config": {"url": "https://example.com/hooks/ci"},
-        "events": ["build.finished", "build.failed"],
+        "events": ["build.finished", "build.failed", "gate.failed"],
     })
     notify_mgr.create(pid, {
         "type": "email",

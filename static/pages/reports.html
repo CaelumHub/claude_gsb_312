@@ -100,7 +100,7 @@ async function loadBuilds() {
   if (!builds.length) { host.innerHTML = '<div class="empty">暂无构建</div>'; return; }
   host.innerHTML = builds.map(b => `
     <div class="build-item ${b.id===currentBuild?'active':''}" onclick="selectBuild('${b.id}')">
-      <div class="row spread"><strong>${esc(b.name||b.id)}</strong>${statusBadge(b.status)}</div>
+      <div class="row spread"><strong>${esc(b.name||b.id)}</strong><span>${statusBadge(b.status)} ${gateBadge(b.gate_status)}</span></div>
       <div class="muted" style="font-size:12px">通过 ${b.passed||0}/${b.total||0} · ${fmtDur(b.duration)} · ${fmtTime(b.finished_at)}</div>
     </div>`).join("");
 }
@@ -120,8 +120,26 @@ function renderReport(r) {
   const prio = Object.entries(r.by_priority || {});
   const failures = r.failures || [];
   const slowest = r.slowest || [];
+  const gate = r.gate;
+  const release = r.release || {};
 
   $("#report-body").innerHTML = `
+    <div class="mt" style="border:1px solid var(--border);border-radius:9px;padding:10px 12px">
+      <div class="row spread">
+        <strong>发布判定</strong>
+        ${releaseBadge(release.decision)}
+      </div>
+      ${(release.reasons || []).length ? `<div class="muted mt" style="font-size:13px">${release.reasons.map(esc).join("；")}</div>` : ""}
+    </div>
+    ${gate ? `<div class="mt" style="border:1px solid var(--border);border-radius:9px;padding:10px 12px">
+      <div class="row spread"><strong>覆盖率门禁</strong>${gateBadge(gate.status)}</div>
+      ${(gate.checks || []).length ? `<table class="mt"><thead><tr><th>检查项</th><th>实际</th><th>阈值</th><th>结果</th></tr></thead><tbody>
+        ${gate.checks.map(c => `<tr><td>${esc(c.name)}</td><td>${c.actual == null ? "—" : c.actual + "%"}</td>
+          <td>≥ ${c.expected}%</td><td>${c.ok ? '<span class="badge passed">通过</span>' : '<span class="badge failed">不达标</span>'}
+          ${c.note ? `<span class="muted" style="font-size:12px"> ${esc(c.note)}</span>` : ""}</td></tr>`).join("")}
+      </tbody></table>` : ""}
+      ${r.test_status ? `<div class="muted mt" style="font-size:12px">测试结果本身为「${STATUS_LABELS[r.test_status] || r.test_status}」，因门禁未通过标记为不通过。</div>` : ""}
+    </div>` : ""}
     <div class="grid cols-4 mt">
       <div class="stat primary"><div class="v">${s.total||0}</div><div class="k">总用例</div></div>
       <div class="stat good"><div class="v">${s.pass_rate ?? 0}%</div><div class="k">通过率</div></div>

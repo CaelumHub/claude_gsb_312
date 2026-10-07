@@ -20,6 +20,8 @@ import statistics
 import time
 from typing import Optional
 
+from .gate import release_decision
+
 FAILED_STATUSES = ("failed", "error", "timeout")
 
 
@@ -68,17 +70,21 @@ class ReportGenerator:
         pass_rate = round(passed / finished * 100, 1) if finished else 0.0
 
         durations = build.get("durations", [])
+        gate = store.read_gate(build_id)
         report = {
             "build_id": build_id,
             "project_id": build.get("project_id"),
             "name": build.get("name") or build_id,
             "status": build.get("status"),
+            "test_status": build.get("test_status"),
             "trigger": build.get("trigger"),
             "suite_id": build.get("suite_id"),
             "env_id": build.get("env_id"),
             "started_at": build.get("started_at"),
             "finished_at": build.get("finished_at"),
             "duration": build.get("duration", 0.0),
+            "gate": gate,
+            "release": release_decision(build, gate),
             "summary": {
                 "total": total,
                 "passed": passed,
@@ -143,6 +149,7 @@ class ReportGenerator:
                 "build_id": b["id"],
                 "name": b.get("name") or b["id"],
                 "status": b.get("status"),
+                "gate_status": b.get("gate_status"),
                 "trigger": b.get("trigger"),
                 "total": b.get("total", 0),
                 "passed": b.get("passed", 0),

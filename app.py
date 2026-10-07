@@ -20,8 +20,8 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from engine import (Scheduler, TestExecutor, EnvironmentManager,          # noqa: E402
-                    CoverageAnalyzer, ReportGenerator, DefectManager,
-                    NotificationManager)
+                    CoverageAnalyzer, CoverageGate, ReportGenerator,
+                    DefectManager, NotificationManager)
 from storage import StoreRegistry, BuildStoreRegistry                       # noqa: E402
 from web import api                                                         # noqa: E402
 from web.seed import seed_demo_data                                         # noqa: E402
@@ -42,6 +42,7 @@ def create_app(data_root: str | None = None) -> Flask:
     executor = TestExecutor()
     env_manager = EnvironmentManager(registry, data_root)
     coverage = CoverageAnalyzer(build_registry)
+    gate = CoverageGate(registry, build_registry, coverage)
     report_gen = ReportGenerator(build_registry)
     defects = DefectManager(registry)
     notify = NotificationManager(registry)
@@ -49,6 +50,7 @@ def create_app(data_root: str | None = None) -> Flask:
         registry, build_registry, executor, env_manager,
         report_gen, coverage, defects, notify,
         max_build_workers=4, max_case_workers=8, tick_seconds=20,
+        gate=gate,
     )
 
     # -- 注入 Flask config -------------------------------------------------
@@ -58,6 +60,7 @@ def create_app(data_root: str | None = None) -> Flask:
     app.config["SCHEDULER"] = scheduler
     app.config["ENV_MANAGER"] = env_manager
     app.config["COVERAGE"] = coverage
+    app.config["GATE"] = gate
     app.config["REPORT_GEN"] = report_gen
     app.config["DEFECTS"] = defects
     app.config["NOTIFY"] = notify
